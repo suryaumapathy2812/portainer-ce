@@ -503,6 +503,7 @@ services:
         - traefik.http.routers.traefik.tls.certresolver=letsencrypt
         - traefik.http.routers.traefik.service=api@internal
         - traefik.http.routers.traefik.middlewares=traefik-auth
+        - traefik.http.services.traefik.loadbalancer.server.port=8080
         - traefik.http.middlewares.traefik-auth.basicauth.users=$TRAEFIK_BASIC_AUTH
 $agent_service
 

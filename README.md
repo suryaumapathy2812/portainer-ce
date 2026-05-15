@@ -30,31 +30,35 @@ Set DNS records for these hostnames to point at your VPS first:
 - `logs.yourdomain.com`
 - `traefik.yourdomain.com`
 
-Run all-in-one:
+Recommended one-line install:
 
 ```sh
+curl -sSL https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/install.sh | \
+  DOMAIN=yourdomain.com \
+  ACME_EMAIL=admin@yourdomain.com \
+  DEPLOY_AGENT=true \
+  INSTALLER_URL=https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/install.sh \
+  sh
+```
+
+Clone and run all-in-one:
+
+```sh
+git clone https://github.com/suryaumapathy2812/portainer-ce.git
+cd portainer-ce
 DOMAIN=yourdomain.com \
 ACME_EMAIL=admin@yourdomain.com \
 sh all-in-one.sh
 ```
 
-Run server-only:
+Clone and run server-only:
 
 ```sh
+git clone https://github.com/suryaumapathy2812/portainer-ce.git
+cd portainer-ce
 DOMAIN=yourdomain.com \
 ACME_EMAIL=admin@yourdomain.com \
 sh server.sh
-```
-
-For remote one-line usage after hosting `install.sh`:
-
-```sh
-curl -sSL https://your-domain.com/install.sh | \
-  DOMAIN=yourdomain.com \
-  ACME_EMAIL=admin@yourdomain.com \
-  DEPLOY_AGENT=true \
-  INSTALLER_URL=https://your-domain.com/install.sh \
-  sh
 ```
 
 ## Join Another VPS
@@ -64,7 +68,7 @@ After bootstrap, check `/opt/platform/join-worker.sh` and `/opt/platform/join-ma
 The generic form is:
 
 ```sh
-curl -sSL https://your-domain.com/install.sh | \
+curl -sSL https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/install.sh | \
   SWARM_JOIN_TOKEN=xxx \
   SWARM_MANAGER_ADDR=1.2.3.4:2377 \
   sh
@@ -75,7 +79,7 @@ curl -sSL https://your-domain.com/install.sh | \
 ```sh
 DOMAIN=yourdomain.com
 ACME_EMAIL=admin@yourdomain.com
-INSTALLER_URL=https://your-domain.com/install.sh
+INSTALLER_URL=https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/install.sh
 PORTAINER_TRUSTED_ORIGINS=https://portainer.yourdomain.com
 
 PORTAINER_DOMAIN=portainer.yourdomain.com
