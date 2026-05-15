@@ -1,14 +1,20 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_DIR="${APP_DIR:-/opt/portainer-platform}"
+BASE_DIR="${BASE_DIR:-/opt}"
+PLATFORM_DIR="${PLATFORM_DIR:-$BASE_DIR/platform}"
+PORTAINER_DIR="${PORTAINER_DIR:-$BASE_DIR/portainer}"
+TRAEFIK_DIR="${TRAEFIK_DIR:-$BASE_DIR/traefik}"
+DOZZLE_DIR="${DOZZLE_DIR:-$BASE_DIR/dozzle}"
 STACK_NAME="${STACK_NAME:-platform}"
 INSTALLER_URL="${INSTALLER_URL:-<installer-url>}"
 
+DOMAIN="${DOMAIN:-}"
 PORTAINER_DOMAIN="${PORTAINER_DOMAIN:-}"
 DOZZLE_DOMAIN="${DOZZLE_DOMAIN:-}"
 TRAEFIK_DOMAIN="${TRAEFIK_DOMAIN:-}"
-TRAEFIK_ACME_EMAIL="${TRAEFIK_ACME_EMAIL:-}"
+ACME_EMAIL="${ACME_EMAIL:-}"
+TRAEFIK_ACME_EMAIL="${TRAEFIK_ACME_EMAIL:-$ACME_EMAIL}"
 
 PORTAINER_TAG="${PORTAINER_TAG:-lts}"
 PORTAINER_AGENT_TAG="${PORTAINER_AGENT_TAG:-lts}"
@@ -34,6 +40,7 @@ TRAEFIK_DASHBOARD_PASSWORD="${TRAEFIK_DASHBOARD_PASSWORD:-}"
 
 ENABLE_EDGE="${ENABLE_EDGE:-false}"
 PORTAINER_EDGE_DOMAIN="${PORTAINER_EDGE_DOMAIN:-}"
+DEPLOY_AGENT="${DEPLOY_AGENT:-true}"
 CONFIGURE_FIREWALL="${CONFIGURE_FIREWALL:-true}"
 ENABLE_UFW="${ENABLE_UFW:-false}"
 CONFIGURE_LOG_ROTATION="${CONFIGURE_LOG_ROTATION:-true}"
@@ -252,7 +259,7 @@ join_swarm() {
   fi
 
   log "Joining Docker Swarm as $SWARM_JOIN_AS"
-  mkdir -p /opt/dozzle/data
+  mkdir -p "$DOZZLE_DIR/data"
   docker swarm join --token "$SWARM_JOIN_TOKEN" $advertise_arg $data_path_arg "$SWARM_MANAGER_ADDR"
 }
 
@@ -311,10 +318,18 @@ generate_dozzle_users() {
 }
 
 validate_bootstrap_inputs() {
+  [ -n "$DOMAIN" ] || [ -n "$PORTAINER_DOMAIN" ] || fail "DOMAIN is required"
+  [ -n "$TRAEFIK_ACME_EMAIL" ] || fail "ACME_EMAIL is required"
+
+  if [ -n "$DOMAIN" ]; then
+    PORTAINER_DOMAIN="${PORTAINER_DOMAIN:-portainer.$DOMAIN}"
+    DOZZLE_DOMAIN="${DOZZLE_DOMAIN:-logs.$DOMAIN}"
+    TRAEFIK_DOMAIN="${TRAEFIK_DOMAIN:-traefik.$DOMAIN}"
+  fi
+
   [ -n "$PORTAINER_DOMAIN" ] || fail "PORTAINER_DOMAIN is required"
   [ -n "$DOZZLE_DOMAIN" ] || fail "DOZZLE_DOMAIN is required"
   [ -n "$TRAEFIK_DOMAIN" ] || fail "TRAEFIK_DOMAIN is required"
-  [ -n "$TRAEFIK_ACME_EMAIL" ] || fail "TRAEFIK_ACME_EMAIL is required"
 
   if bool_true "$ENABLE_EDGE" && [ -z "$PORTAINER_EDGE_DOMAIN" ]; then
     fail "PORTAINER_EDGE_DOMAIN is required when ENABLE_EDGE=true"
@@ -326,8 +341,8 @@ validate_bootstrap_inputs() {
 }
 
 prepare_platform_files() {
-  mkdir -p "$APP_DIR" "$APP_DIR/dozzle"
-  chmod 700 "$APP_DIR"
+  mkdir -p "$PLATFORM_DIR" "$PORTAINER_DIR" "$TRAEFIK_DIR/dynamic" "$DOZZLE_DIR/data"
+  chmod 700 "$PLATFORM_DIR" "$PORTAINER_DIR" "$TRAEFIK_DIR" "$DOZZLE_DIR"
 }
 
 prepare_secrets() {
@@ -354,16 +369,63 @@ prepare_secrets() {
 
   ensure_secret_from_stdin "portainer_admin_password" "$PORTAINER_ADMIN_PASSWORD"
 
-  generate_dozzle_users "$DOZZLE_ADMIN_USER" "$DOZZLE_ADMIN_PASSWORD" "$DOZZLE_ADMIN_EMAIL" > "$APP_DIR/dozzle/users.yml"
-  chmod 600 "$APP_DIR/dozzle/users.yml"
-  ensure_secret_from_file "dozzle_users" "$APP_DIR/dozzle/users.yml"
+  generate_dozzle_users "$DOZZLE_ADMIN_USER" "$DOZZLE_ADMIN_PASSWORD" "$DOZZLE_ADMIN_EMAIL" > "$DOZZLE_DIR/users.yml"
+  chmod 600 "$DOZZLE_DIR/users.yml"
+  ensure_secret_from_file "dozzle_users" "$DOZZLE_DIR/users.yml"
 
   TRAEFIK_BASIC_AUTH=$(generate_basic_auth_hash "$TRAEFIK_DASHBOARD_USER" "$TRAEFIK_DASHBOARD_PASSWORD")
   export TRAEFIK_BASIC_AUTH GENERATED_PORTAINER_PASSWORD GENERATED_DOZZLE_PASSWORD GENERATED_TRAEFIK_PASSWORD
 }
 
+write_traefik_config() {
+  cat > "$TRAEFIK_DIR/traefik.yml" <<EOF
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  swarm:
+    endpoint: unix:///var/run/docker.sock
+    exposedByDefault: false
+    network: $PUBLIC_NETWORK
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+
+ping: {}
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: $TRAEFIK_ACME_EMAIL
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+
+log:
+  level: INFO
+
+accessLog: {}
+EOF
+
+  cat > "$TRAEFIK_DIR/dynamic/middlewares.yml" <<'EOF'
+http:
+  middlewares: {}
+EOF
+}
+
 write_stack_file() {
-  stack_file="$APP_DIR/$STACK_NAME-stack.yml"
+  stack_file="$PLATFORM_DIR/$STACK_NAME-stack.yml"
 
   edge_labels=""
   if bool_true "$ENABLE_EDGE"; then
@@ -376,6 +438,34 @@ write_stack_file() {
         - traefik.http.services.portainer-edge.loadbalancer.server.port=8000"
   fi
 
+  agent_service=""
+  portainer_agent_command=""
+  portainer_agent_network=""
+  if bool_true "$DEPLOY_AGENT"; then
+    agent_service="
+  agent:
+    image: portainer/agent:$PORTAINER_AGENT_TAG
+    environment:
+      AGENT_CLUSTER_ADDR: tasks.agent
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - $AGENT_NETWORK
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.platform.os == linux
+"
+    portainer_agent_command="
+      - -H
+      - tcp://tasks.agent:9001
+      - --tlsskipverify"
+    portainer_agent_network="
+      - $AGENT_NETWORK"
+  fi
+
   cat > "$stack_file" <<EOF
 version: "3.8"
 
@@ -383,22 +473,7 @@ services:
   traefik:
     image: traefik:$TRAEFIK_TAG
     command:
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --providers.swarm=true
-      - --providers.swarm.endpoint=unix:///var/run/docker.sock
-      - --providers.swarm.exposedbydefault=false
-      - --providers.swarm.network=$PUBLIC_NETWORK
-      - --api.dashboard=true
-      - --ping=true
-      - --certificatesresolvers.letsencrypt.acme.email=$TRAEFIK_ACME_EMAIL
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
-      - --log.level=INFO
-      - --accesslog=true
+      - --configFile=/etc/traefik/traefik.yml
     ports:
       - target: 80
         published: 80
@@ -410,6 +485,8 @@ services:
         mode: ingress
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - $TRAEFIK_DIR/traefik.yml:/etc/traefik/traefik.yml:ro
+      - $TRAEFIK_DIR/dynamic:/etc/traefik/dynamic:ro
       - $TRAEFIK_VOLUME:/letsencrypt
     networks:
       - $PUBLIC_NETWORK
@@ -427,28 +504,11 @@ services:
         - traefik.http.routers.traefik.service=api@internal
         - traefik.http.routers.traefik.middlewares=traefik-auth
         - traefik.http.middlewares.traefik-auth.basicauth.users=$TRAEFIK_BASIC_AUTH
-
-  agent:
-    image: portainer/agent:$PORTAINER_AGENT_TAG
-    environment:
-      AGENT_CLUSTER_ADDR: tasks.agent
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes:/var/lib/docker/volumes
-    networks:
-      - $AGENT_NETWORK
-    deploy:
-      mode: global
-      placement:
-        constraints:
-          - node.platform.os == linux
+$agent_service
 
   portainer:
     image: portainer/portainer-ce:$PORTAINER_TAG
-    command:
-      - -H
-      - tcp://tasks.agent:9001
-      - --tlsskipverify
+    command:$portainer_agent_command
       - --http-enabled
       - --admin-password-file
       - /run/secrets/portainer_admin_password
@@ -460,7 +520,7 @@ services:
       - $PORTAINER_VOLUME:/data
     networks:
       - $PUBLIC_NETWORK
-      - $AGENT_NETWORK
+$portainer_agent_network
     deploy:
       replicas: 1
       placement:
@@ -483,7 +543,7 @@ services:
       DOZZLE_AUTH_PROVIDER: simple
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /opt/dozzle/data:/data
+      - $DOZZLE_DIR/data:/data
     secrets:
       - source: dozzle_users
         target: /data/users.yml
@@ -525,8 +585,14 @@ EOF
 }
 
 write_env_file() {
-  cat > "$APP_DIR/install.env" <<EOF
+  cat > "$PLATFORM_DIR/install.env" <<EOF
+BASE_DIR=$BASE_DIR
+PLATFORM_DIR=$PLATFORM_DIR
+PORTAINER_DIR=$PORTAINER_DIR
+TRAEFIK_DIR=$TRAEFIK_DIR
+DOZZLE_DIR=$DOZZLE_DIR
 STACK_NAME=$STACK_NAME
+DOMAIN=$DOMAIN
 PORTAINER_DOMAIN=$PORTAINER_DOMAIN
 DOZZLE_DOMAIN=$DOZZLE_DOMAIN
 TRAEFIK_DOMAIN=$TRAEFIK_DOMAIN
@@ -542,7 +608,7 @@ DOZZLE_NETWORK=$DOZZLE_NETWORK
 PORTAINER_VOLUME=$PORTAINER_VOLUME
 TRAEFIK_VOLUME=$TRAEFIK_VOLUME
 EOF
-  chmod 600 "$APP_DIR/install.env"
+  chmod 600 "$PLATFORM_DIR/install.env"
 }
 
 write_join_files() {
@@ -552,15 +618,15 @@ write_join_files() {
   worker_token=$(docker swarm join-token -q worker)
   manager_token=$(docker swarm join-token -q manager)
 
-  cat > "$APP_DIR/join-worker.sh" <<EOF
+  cat > "$PLATFORM_DIR/join-worker.sh" <<EOF
 #!/usr/bin/env sh
 curl -sSL '$INSTALLER_URL' | SWARM_JOIN_TOKEN=$worker_token SWARM_MANAGER_ADDR=$manager_addr:2377 sh
 EOF
-  cat > "$APP_DIR/join-manager.sh" <<EOF
+  cat > "$PLATFORM_DIR/join-manager.sh" <<EOF
 #!/usr/bin/env sh
 curl -sSL '$INSTALLER_URL' | SWARM_JOIN_TOKEN=$manager_token SWARM_MANAGER_ADDR=$manager_addr:2377 SWARM_JOIN_AS=manager sh
 EOF
-  chmod 700 "$APP_DIR/join-worker.sh" "$APP_DIR/join-manager.sh"
+  chmod 700 "$PLATFORM_DIR/join-worker.sh" "$PLATFORM_DIR/join-manager.sh"
 }
 
 deploy_stack() {
@@ -569,7 +635,7 @@ deploy_stack() {
     return
   fi
 
-  docker stack deploy -c "$APP_DIR/$STACK_NAME-stack.yml" "$STACK_NAME"
+  docker stack deploy -c "$PLATFORM_DIR/$STACK_NAME-stack.yml" "$STACK_NAME"
 }
 
 bootstrap() {
@@ -579,7 +645,6 @@ bootstrap() {
   configure_firewall
 
   prepare_platform_files
-  mkdir -p /opt/dozzle/data
 
   ensure_network "$PUBLIC_NETWORK" false
   ensure_network "$AGENT_NETWORK" true
@@ -588,6 +653,7 @@ bootstrap() {
   ensure_volume "$TRAEFIK_VOLUME"
 
   prepare_secrets
+  write_traefik_config
   write_stack_file
   write_env_file
   write_join_files
@@ -607,8 +673,9 @@ bootstrap() {
   log "Traefik username:   $TRAEFIK_DASHBOARD_USER"
   log "Traefik password:   $TRAEFIK_DASHBOARD_PASSWORD"
   log ""
-  log "Stack file: $APP_DIR/$STACK_NAME-stack.yml"
-  log "Join helpers: $APP_DIR/join-worker.sh and $APP_DIR/join-manager.sh"
+  log "Stack file: $PLATFORM_DIR/$STACK_NAME-stack.yml"
+  log "Traefik config: $TRAEFIK_DIR/traefik.yml"
+  log "Join helpers: $PLATFORM_DIR/join-worker.sh and $PLATFORM_DIR/join-manager.sh"
   log ""
   log "Check status with: docker service ls"
 }
