@@ -80,7 +80,7 @@ curl -sSL https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/
 DOMAIN=yourdomain.com
 ACME_EMAIL=admin@yourdomain.com
 INSTALLER_URL=https://raw.githubusercontent.com/suryaumapathy2812/portainer-ce/main/install.sh
-PORTAINER_TRUSTED_ORIGINS=https://portainer.yourdomain.com
+PORTAINER_TRUSTED_ORIGINS=optional-comma-separated-origins
 
 PORTAINER_DOMAIN=portainer.yourdomain.com
 DOZZLE_DOMAIN=logs.yourdomain.com

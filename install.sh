@@ -335,9 +335,6 @@ validate_bootstrap_inputs() {
     fail "PORTAINER_EDGE_DOMAIN is required when ENABLE_EDGE=true"
   fi
 
-  if [ -z "$PORTAINER_TRUSTED_ORIGINS" ]; then
-    PORTAINER_TRUSTED_ORIGINS="https://$PORTAINER_DOMAIN"
-  fi
 }
 
 prepare_platform_files() {
@@ -466,6 +463,13 @@ write_stack_file() {
       - $AGENT_NETWORK"
   fi
 
+  portainer_trusted_origins_command=""
+  if [ -n "$PORTAINER_TRUSTED_ORIGINS" ]; then
+    portainer_trusted_origins_command="
+      - --trusted-origins
+      - $PORTAINER_TRUSTED_ORIGINS"
+  fi
+
   cat > "$stack_file" <<EOF
 version: "3.8"
 
@@ -513,8 +517,7 @@ $agent_service
       - --http-enabled
       - --admin-password-file
       - /run/secrets/portainer_admin_password
-      - --trusted-origins
-      - $PORTAINER_TRUSTED_ORIGINS
+$portainer_trusted_origins_command
     secrets:
       - portainer_admin_password
     volumes:
