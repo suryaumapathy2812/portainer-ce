@@ -114,6 +114,56 @@ For multi-node Swarm, set `TRUSTED_NODE_CIDR` so the script can allow Swarm traf
 
 The script does not enable UFW unless `ENABLE_UFW=true` is set.
 
+## Cloudflare And TLS
+
+Before the first install, create these Cloudflare DNS records and point them to your VPS public IP:
+
+- `A portainer`
+- `A logs`
+- `A traefik`
+
+Set each record to **DNS only** until Traefik has issued Let's Encrypt certificates. The default Traefik config uses the Let's Encrypt HTTP-01 challenge, so port `80/tcp` must reach the VPS directly.
+
+In Cloudflare SSL/TLS, use **Full** or **Full (strict)**. Do not use **Flexible**.
+
+If a site loads but the browser says it is not secure, check the certificate issuer. If it says `TRAEFIK DEFAULT CERT`, Let's Encrypt has not issued yet. Check Traefik logs:
+
+```sh
+docker service logs platform_traefik --tail 100
+```
+
+Common causes are:
+
+- Cloudflare record is proxied before the first certificate is issued
+- Port `80/tcp` is blocked by the VPS firewall or provider firewall
+- DNS has not propagated to the VPS IP yet
+- The hostname does not match `DOMAIN`, `PORTAINER_DOMAIN`, `DOZZLE_DOMAIN`, or `TRAEFIK_DOMAIN`
+
+After certificates are issued and HTTPS works, you may switch Cloudflare proxy on if desired. Keep SSL/TLS mode on **Full** or **Full (strict)**.
+
+## Repair Existing Install
+
+If an earlier generated stack has `--trusted-origins` under the Portainer command, remove those two lines from `/opt/platform/platform-stack.yml`:
+
+```yaml
+- --trusted-origins
+- https://portainer.yourdomain.com
+```
+
+Then redeploy:
+
+```sh
+docker stack deploy -c /opt/platform/platform-stack.yml platform
+```
+
+If Portainer is currently crash-looping from trusted origins, repair the running service immediately:
+
+```sh
+docker service update \
+  --args '-H tcp://tasks.agent:9001 --tlsskipverify --http-enabled --admin-password-file /run/secrets/portainer_admin_password' \
+  platform_portainer
+```
+
 ## Files Created
 
 ```text
