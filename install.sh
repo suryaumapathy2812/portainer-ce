@@ -417,7 +417,14 @@ EOF
 
   cat > "$TRAEFIK_DIR/dynamic/middlewares.yml" <<'EOF'
 http:
-  middlewares: {}
+  middlewares:
+    secure-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        contentTypeNosniff: true
+        frameDeny: true
 EOF
 }
 
